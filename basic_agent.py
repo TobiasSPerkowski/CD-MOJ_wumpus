@@ -17,20 +17,20 @@ class WumpusKB:
     def add_clause(self, c):
         self.solver.add_clause(c)
 
-    def no_breeze(self, adj):
+    def no_pits(self, adj):
         for x,y in adj:
             self.add_clause([-self.pit(x,y)])
 
-    def breeze(self, adj):
+    def pits(self, adj):
         clause = [self.pit(x,y) for x,y in adj]
         if clause:
             self.add_clause(clause)
 
-    def no_stench(self, adj):
+    def no_wumpuses(self, adj):
         for x,y in adj:
             self.add_clause([-self.wumpus(x,y)])
 
-    def stench(self, adj):
+    def wumpuses(self, adj):
         clause = [self.wumpus(x,y) for x,y in adj]
         if clause:
             self.add_clause(clause)
@@ -78,13 +78,27 @@ class Agent:
 
     def adj(self, pos):
         x,y = pos
-        return [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]
+        # retornando na melhor ordem (evita giros desnecessarios)
+        if self.dir == 0: #N
+            return [(x, y+1), (x-1, y), (x, y-1), (x+1, y)]
+        if self.dir == 1: #E
+            return [(x+1, y), (x, y+1), (x-1, y), (x, y-1)]
+        if self.dir == 2: #S
+            return [(x, y-1), (x+1, y), (x, y+1), (x-1, y)]
+        #W
+        return [(x-1, y), (x, y-1), (x+1, y), (x, y+1)]
 
     def update(self, sensors):
         stench, breeze, glitter, bump, scream = sensors
 
-        if bump == '1': #moveu p parede, volta
+        if bump == '1': # bateu em uma parede
             self.walls.add(self.pos)
+            # informando kb q n tem pit nem wumpus
+            no_pit = -self.kb.pit(self.pos[0], self.pos[1])
+            no_wumpus = -self.kb.wumpus(self.pos[0], self.pos[1])
+            self.kb.add_clause([no_pit])
+            self.kb.add_clause([no_wumpus])
+            # voltando p posicao anterior
             self.pos = self.path_stack.pop()
             self.target = None
         
@@ -94,14 +108,14 @@ class Agent:
         adj = [c for c in self.adj(self.pos) if c not in self.walls]
 
         if breeze == '1':
-            self.kb.breeze(adj)
+            self.kb.pits(adj)
         else:
-            self.kb.no_breeze(adj)
+            self.kb.no_pits(adj)
 
         if stench == '1':
-            self.kb.stench(adj)
+            self.kb.wumpuses(adj)
         else:
-            self.kb.no_stench(adj)
+            self.kb.no_wumpuses(adj)
         
         for c in adj:
             if c not in self.visited and c not in self.safe:
@@ -152,6 +166,9 @@ class Agent:
         for cell in adj:
             if cell in self.safe and cell not in self.visited:
                 self.target = cell
+                #print("pos: ", self.pos)
+                #print("dir: ", self.dir)
+                #print("target: ", self.target)
                 return self.move_towards_target()
         
         # se n, backtracking
