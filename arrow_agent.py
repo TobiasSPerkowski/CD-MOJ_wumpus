@@ -17,39 +17,37 @@ class WumpusKB:
     def add_clause(self, c):
         self.solver.add_clause(c)
 
-    def no_breeze(self, adj):
+    def no_pits(self, adj):
         for x,y in adj:
             self.add_clause([-self.pit(x,y)])
 
-    def breeze(self, adj):
+    def pits(self, adj):
         clause = [self.pit(x,y) for x,y in adj]
         if clause:
             self.add_clause(clause)
 
-    def no_stench(self, adj):
+    def no_wumpuses(self, adj):
         for x,y in adj:
             self.add_clause([-self.wumpus(x,y)])
 
-    def stench(self, adj):
+    def wumpuses(self, adj):
         clause = [self.wumpus(x,y) for x,y in adj]
         if clause:
             self.add_clause(clause)
-    
-    def has_wumpus(self, x,y):
-        w = self.wumpus(x,y)
-        # se nao ter wumpus for unsat, eh pq tem wumpus
-        return not self.solver.solve(assumptions=[-w])
 
-    def is_safe(self, x,y):
-        p = self.pit(x,y)
-        w = self.wumpus(x,y)
+    def pit_possible(self, cell):
+        p = self.pit(cell[0], cell[1])
+        return self.solver.solve(assumptions=[p])
 
-        pit = self.solver.solve(assumptions=[p])
-        wumpus = self.solver.solve(assumptions=[w])
-        
-        # soh eh safe se pit e wumpus forem ambos unsat
-        return not pit and not wumpus
-    
+    def wumpus_possible(self, cell):
+        w = self.wumpus(cell[0], cell[1])
+        return self.solver.solve(assumptions=[w])
+
+    def is_safe(self, cell):
+        return (not self.pit_possible(cell) 
+                and not self.wumpus_possible(cell))
+
+
 
 DIRECTIONS = ["N", "E", "S", "W"]
 MOVES = [
@@ -63,12 +61,19 @@ class Agent:
     def __init__(self):
         self.pos = (0, 0)
         self.dir = 0
+
+        self.stench = False
+        self.breeze = False
+        self.bump = False
+        self.scream = False
+
         self.target = None
+        self.shoot = False
+        self.just_shot = False
 
         self.visited = set()
         self.safe = set()
         self.walls = set()
-        self.wumpuses = set()
         self.path_stack = []
 
         self.kb = WumpusKB()
@@ -84,47 +89,67 @@ class Agent:
 
     def adj(self, pos):
         x,y = pos
-        return [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]
+        # retornando na melhor ordem (evita giros desnecessarios)
+        if self.dir == 0: #N
+            return [(x, y+1), (x-1, y), (x, y-1), (x+1, y)]
+        if self.dir == 1: #E
+            return [(x+1, y), (x, y+1), (x-1, y), (x, y-1)]
+        if self.dir == 2: #S
+            return [(x, y-1), (x+1, y), (x, y+1), (x-1, y)]
+        #W
+        return [(x-1, y), (x, y-1), (x+1, y), (x, y+1)]
 
     def update(self, sensors):
-        stench, breeze, glitter, bump, scream = sensors
+        self.stench = sensors[0] == '1'
+        self.breeze = sensors[1] == '1'
+        self.bump = sensors[3] == '1'
+        self.scream = sensors[4] == '1'
 
-        if bump == '1': #moveu p parede, volta
+        if self.bump: # bateu em uma parede
             self.walls.add(self.pos)
+            # informando kb q n tem pit nem wumpus
+            no_pit = -self.kb.pit(self.pos[0], self.pos[1])
+            no_wumpus = -self.kb.wumpus(self.pos[0], self.pos[1])
+            self.kb.add_clause([no_pit])
+            self.kb.add_clause([no_wumpus])
+            # voltando p posicao anterior
             self.pos = self.path_stack.pop()
             self.target = None
         
-        if scream == "1": #wumpus morreu, atualiza sets
-            self.wumpuses.discard(self.target)
-            self.safe.add(self.target)
+        if self.just_shot:
+            if self.scream: # wumpus morreu
+                self.safe.add(self.target)
+                # expandir para alem da adjacente
+            else: # n tinha wumpus
+                self.safe.add(self.target)
+                # expandir para alem da adjacente
             self.target = None
+            self.shoot = False
+            self.just_shot = False
+                
         
         self.visited.add(self.pos)
         self.safe.add(self.pos)
 
         adj = [c for c in self.adj(self.pos) if c not in self.walls]
 
-        if breeze == '1':
-            self.kb.breeze(adj)
+        if self.breeze:
+            self.kb.pits(adj)
         else:
-            self.kb.no_breeze(adj)
+            self.kb.no_pits(adj)
 
-        if stench == '1':
-            self.kb.stench(adj)
-            for c in adj:
-                if c not in self.visited and c not in self.safe:
-                    if self.kb.has_wumpus(c[0], c[1]):
-                        self.wumpuses.add(c)
+        if self.stench:
+            self.kb.wumpuses(adj)
         else:
-            self.kb.no_stench(adj)
+            self.kb.no_wumpuses(adj)
         
-        for c in adj:
-            if c not in self.visited and c not in self.safe:
-                if self.kb.is_safe(c[0], c[1]):
-                    self.safe.add(c)
+        for cell in adj:
+            if cell not in self.visited and cell not in self.safe:
+                if self.kb.is_safe(cell):
+                    self.safe.add(cell)
 
 
-    def move_towards_target(self):
+    def next_action(self):
         if self.target is None: # n deve acontecer
             return "r" # vira pra direita (debugging)
 
@@ -145,9 +170,10 @@ class Agent:
         # se n estiver virado pro alvo, vira pra esquerda
         if self.dir != target_dir:
             return self.turn_left()
-
-        # se target for wumpus, atira
-        if self.target in self.wumpuses:
+        
+        # se for para atirar, atira
+        if self.shoot:
+            self.just_shot = True
             return "s"
 
         # atualizando pilha do caminho
@@ -164,27 +190,30 @@ class Agent:
     def choose(self):
         # se jah tiver target, apenas move em direcao a ele
         if self.target and self.pos != self.target:
-            return self.move_towards_target()
+            return self.next_action()
 
         # adjacente segura n visitada
         adj = [c for c in self.adj(self.pos) if c not in self.walls]
         for cell in adj:
             if cell in self.safe and cell not in self.visited:
                 self.target = cell
-                return self.move_towards_target()
+                return self.next_action()
+            
+        # c.c, considera atirar
+        if self.stench:  # and not self.breeze ?
+            for cell in adj:
+                if (cell not in self.safe
+                    and self.kb.wumpus_possible(cell)):
+                    self.target = cell
+                    self.shoot = True
+                    return self.next_action()
         
-        # se n, tenta matar wumpus
-        for cell in adj:
-            if cell in self.wumpuses:
-                self.target = cell
-                return self.move_towards_target()
-
-        # se n, backtracking
+        # c.c, backtracking
         if len(self.path_stack) > 0:
             self.target = self.path_stack[-1]
-            return self.move_towards_target()
+            return self.next_action()
         
-        # se n, desiste
+        # c.c, desiste
         return "e"
 
 
